@@ -22,12 +22,11 @@ The name comes from Greek νόημα (nóēma) — "thought, intention, meaning.
 | `noema_poll` | provider/both | Poll for pending requests |
 | `noema_respond` | provider/both | Respond to a pending request |
 
-### Auto-Decoding
+### Decoding
 
-The extension automatically decodes `§b64:...§` encoded tokens before displaying messages to users. This means:
+Noema encodes untrusted content as `§b64:...§` tokens. This extension provides a decoder utility, but **decoding must be integrated at the gateway level** to ensure the AI never sees decoded untrusted content.
 
-- **AI sees**: `"Email from §b64:Sm9obiBEb2U=§"` (opaque, can't interpret)
-- **Human sees**: `"Email from John Doe"` (readable)
+See [Gateway Integration](#gateway-integration) below.
 
 ## Installation
 
@@ -60,6 +59,10 @@ extensions:
 | `token` | Yes | Authentication token (configured in proxy) |
 | `role` | Yes | `requester`, `provider`, or `both` |
 | `subscriptions` | No | Agent IDs to subscribe to (provider roles only) |
+
+### Security Note
+
+The `proxyUrl` is set in `openclaw.yaml` at deploy time. The agent cannot modify or override this URL — all Noema requests go only to the configured proxy. This prevents the agent from exfiltrating data to arbitrary endpoints.
 
 ### Role Examples
 
@@ -166,6 +169,112 @@ noema_respond({
 })
 ```
 
+## Gateway Integration
+
+### Why Gateway-Level Decoding?
+
+The security model requires that:
+1. **AI sees encoded tokens** — `§b64:SGVsbG8=§` (opaque, can't interpret as instructions)
+2. **Human sees plaintext** — `Hello` (readable)
+
+Decoding must happen **after** the AI generates its response and **before** the message is sent to the user. This is an output boundary concern, not something the AI should control.
+
+### Integration Points
+
+The decoder should be integrated into OpenClaw's outbound message path. There are two options:
+
+#### Option A: Hook into `message_sending` (Preferred)
+
+OpenClaw's plugin system defines a `message_sending` hook that runs before messages are delivered. This extension registers a handler, but **OpenClaw core must call the hook**.
+
+**Current status:** The hook exists in the plugin API (`src/plugins/types.ts`) but is not yet invoked in the delivery path (`src/infra/outbound/deliver.ts`).
+
+**Required OpenClaw change:**
+
+In `src/infra/outbound/deliver.ts`, before delivering payloads:
+
+```typescript
+import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
+
+// Inside deliverOutboundPayloads, before sending:
+const hookRunner = getGlobalHookRunner();
+if (hookRunner?.hasHooks("message_sending")) {
+  for (const payload of normalizedPayloads) {
+    const result = await hookRunner.runMessageSending(
+      { to, content: payload.text ?? "" },
+      { channelId: channel, accountId }
+    );
+    if (result?.cancel) {
+      continue; // Skip this payload
+    }
+    if (result?.content !== undefined) {
+      payload.text = result.content; // Use modified content
+    }
+  }
+}
+```
+
+Once this is in OpenClaw, the extension's decoder will work automatically.
+
+#### Option B: Custom Outbound Wrapper (Workaround)
+
+Until Option A is implemented, operators can wrap the outbound delivery:
+
+```typescript
+// In a custom extension or fork
+import { decodeNoema } from "@noema/openclaw";
+
+// Wrap the original deliverOutboundPayloads
+const originalDeliver = deliverOutboundPayloads;
+export async function deliverOutboundPayloads(params) {
+  // Decode all payloads before sending
+  const decodedPayloads = params.payloads.map(p => ({
+    ...p,
+    text: p.text ? decodeNoema(p.text) : p.text
+  }));
+  return originalDeliver({ ...params, payloads: decodedPayloads });
+}
+```
+
+### Using the Decoder Directly
+
+The extension exports the decoder for custom integrations:
+
+```typescript
+import { decodeNoema, hasNoemaTokens } from "@noema/openclaw";
+
+// Check if text has encoded tokens
+if (hasNoemaTokens(text)) {
+  // Decode all §b64:...§ tokens
+  const decoded = decodeNoema(text);
+  console.log(decoded);
+}
+```
+
+**Examples:**
+
+| Encoded | Decoded |
+|---------|---------|
+| `§b64:SGVsbG8gV29ybGQ=§` | `Hello World` |
+| `Email from §b64:Sm9obiBEb2U=§` | `Email from John Doe` |
+| `Priority: high` | `Priority: high` (unchanged) |
+
+### Decoder Implementation
+
+```typescript
+const NOEMA_TOKEN_REGEX = /§b64:([A-Za-z0-9+/=]+)§/g;
+
+export function decodeNoema(text: string): string {
+  return text.replace(NOEMA_TOKEN_REGEX, (_, encoded: string) => {
+    try {
+      return Buffer.from(encoded, "base64").toString("utf-8");
+    } catch {
+      return `§b64:${encoded}§`; // Return original on error
+    }
+  });
+}
+```
+
 ## Security Model
 
 ### What Noema Protects Against
@@ -188,6 +297,36 @@ noema_respond({
 | Requester schemas | Trusted (requesters define their own) |
 | Provider code | Trusted (operator-approved) |
 | External data content | **Untrusted** (encoded by proxy) |
+
+### Data Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         DATA FLOW                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  External Data ──► Provider Agent ──► Noema Proxy ──► Requester │
+│  (untrusted)       (fetches data)     (validates &    (processes │
+│                                        encodes)        safely)   │
+│                                                            │     │
+│                                                            ▼     │
+│                                                     Agent Output │
+│                                                     (encoded)    │
+│                                                            │     │
+│                                                            ▼     │
+│                                                   ┌────────────┐ │
+│                                                   │  GATEWAY   │ │
+│                                                   │  DECODER   │ │
+│                                                   │ (decodes   │ │
+│                                                   │  §b64:...§)│ │
+│                                                   └─────┬──────┘ │
+│                                                         │        │
+│                                                         ▼        │
+│                                                      Human       │
+│                                                   (sees plain    │
+│                                                    text)         │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## Example: Email Triage
 
@@ -218,8 +357,10 @@ extensions:
 2. Assistant calls `noema_request` with email schema
 3. Email provider polls, fetches emails, responds
 4. Proxy validates and encodes unstructured fields
-5. Assistant processes safely (can sort by priority, but can't read subject)
-6. Gateway decodes for human display
+5. Assistant processes safely (can sort by priority, but can't read subject as instructions)
+6. Assistant outputs: `"High priority from §b64:Sm9obiBEb2U=§: §b64:UTEgQnVkZ2V0...§"`
+7. **Gateway decodes** before sending to Telegram/Discord/etc
+8. Human sees: `"High priority from John Doe: Q1 Budget Review"`
 
 ## API Reference
 
@@ -305,6 +446,9 @@ npm install
 # Build
 npm run build
 
+# Run tests
+npm test
+
 # Link for local development
 npm link
 cd ~/.openclaw && npm link @noema/openclaw
@@ -313,7 +457,7 @@ cd ~/.openclaw && npm link @noema/openclaw
 ## Related
 
 - [Noema Protocol](https://github.com/ClawControlNoema/Noema) — Full specification
-- [Noema Proxy](https://github.com/ClawControlNoema/Noema/tree/main/proxy) — Proxy server implementation
+- [Noema Proxy](https://github.com/ClawControlNoema/noema-proxy) — Proxy server implementation
 
 ## License
 

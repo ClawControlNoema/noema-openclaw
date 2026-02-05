@@ -1,0 +1,57 @@
+{
+  "name": "@noema/openclaw",
+  "version": "0.1.0",
+  "description": "OpenClaw extension for Noema proxy communication between AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "noema",
+    "ai-agents",
+    "schema-validation",
+    "prompt-injection"
+  ],
+  "author": "ClawControl",
+  "license": "(MIT OR Apache-2.0)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ClawControlNoema/noema-openclaw.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ClawControlNoema/noema-openclaw/issues"
+  },
+  "homepage": "https://github.com/ClawControlNoema/noema-openclaw#readme",
+  "peerDependencies": {
+    "openclaw": ">=2025.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.8",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

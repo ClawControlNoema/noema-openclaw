@@ -1,0 +1,32 @@
+{
+  "id": "noema",
+  "name": "Noema",
+  "description": "Schema-enforcing communication between AI agents via Noema proxy. Enables secure, validated data exchange with automatic encoding of untrusted content to prevent prompt injection.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "proxyUrl": {
+        "type": "string",
+        "description": "URL of the Noema proxy server"
+      },
+      "token": {
+        "type": "string",
+        "description": "Authentication token for the Noema proxy"
+      },
+      "role": {
+        "type": "string",
+        "enum": ["requester", "provider", "both"],
+        "description": "Agent role: 'requester' to request data, 'provider' to serve requests, 'both' for full participation"
+      },
+      "subscriptions": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Agent IDs to subscribe to (provider/both roles only). Filters which requests this agent sees."
+      }
+    },
+    "required": ["proxyUrl", "token", "role"]
+  }
+}
